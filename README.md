@@ -1,0 +1,351 @@
+# 微信聊天模仿助手（本地离线版）
+
+学你自己发微信的说话方式，帮你写出「像你本人会回的话」，并推荐一个合适的表情包。
+**不连接微信、不读取微信数据库、不自动发送消息**，全部数据只保存在你自己的电脑上。
+
+> 工作流：从微信手动复制对方消息 → 粘贴进来 → 生成 2~3 条仿你口吻的回复 → 手动复制文字、手动选表情包发送。
+
+---
+
+## 一、整体架构
+
+```
+wechat_assistant/
+├── chat_records/            # 原始聊天记录：一个联系人一个 txt（你自己从微信复制粘贴）
+│   ├── 朋友_小张.txt         # 示例素材
+│   ├── 家人_妈妈.txt
+│   └── 同事_李工.txt
+├── persona/                 # 人设档案：一个联系人一份 yaml（程序自动生成，可手动微调）
+│   ├── _template.yaml       # 人设模板（字段说明）
+│   ├── 朋友_小张.yaml
+│   ├── 家人_妈妈.yaml
+│   └── 同事_李工.yaml
+├── emoji_lib/               # 本地表情包库
+│   ├── emoji_tag.csv        # 文件名 + 标签，例如 doge.png,搞笑,狗头,无语
+│   ├── doge.png             # 占位图，请替换成你自己的表情包
+│   └── ...                  # 共 12 张占位图
+├── main.py                  # 核心引擎（解析 / 学习 / 生成 / 表情包推荐）+ 命令行入口
+├── app.py                   # Streamlit 网页版界面
+├── config.yaml              # 全部配置：我是谁、语气、意图、模板、禁忌话术、表情包标签
+├── requirements.txt         # 依赖清单
+└── README.md                # 本文件
+```
+
+### 模块职责
+
+| 模块 | 作用 |
+| --- | --- |
+| `main.py` §3 解析 | 把聊天记录 txt 解析成 `{时间, 说话人, 内容, 是不是我}`，支持带时间/不带时间/多行消息 |
+| `main.py` §4 统计 | 统计我的字数分布、高频词、口头禅、标点习惯、表情使用率、提问率 |
+| `main.py` §5 人设 | 把统计结果加工成「个人聊天人设档案」（总结 / 高频词 / 禁忌话术 / 回复示例） |
+| `main.py` §7 生成 | 判断对方消息意图 → 挑模板 → 用我的口头禅和语气润色 → 产出 2~3 条备选 |
+| `main.py` §8 表情包 | 关键词 → 标签 → 给表情包打分，返回 1~2 个最匹配的文件名和推荐理由 |
+| `app.py` | 可视化：选联系人、生成回复、看人设、逛表情包库、导入/更新聊天记录 |
+
+### 数据流
+
+```
+chat_records/*.txt ──解析──> 统计(高频词/标点/表情/长度)
+                                   │
+                                   ▼
+                        persona/<联系人>.yaml   <── 可手动修改
+                                   │
+对方消息 + 联系人 ──> 意图识别 ──> 挑模板 ──> 按人设润色 ──> 2~3 条备选回复
+                                   │
+                       关键词 → 标签 ──> emoji_tag.csv ──> 推荐 1~2 个表情包
+```
+
+### 三种语气的判定逻辑
+
+| 联系人 | 判定依据 | 结果 |
+| --- | --- | --- |
+| 朋友 | 调侃/网络用语占比 ≥ 12% | 沙雕（短句 + 哈哈哈哈，几乎不带标点） |
+| 家人 | 无明显调侃/书面语特征 | 温和（多用「啦、呀、~」，句子偏短） |
+| 同事 | 「收到/确认/同步」类词占比 ≥ 25% | 正式（中等长度，会加「好的，」「谢谢」） |
+
+语气会写进人设档案（`style.tone`），你可以直接改成 `沙雕 / 温和 / 正式 / 中性 / 简短`，
+生成时就会按新语气润色。
+
+---
+
+## 二、需要安装的软件和包
+
+### 1. 软件
+
+| 软件 | 版本要求 | 用途 |
+| --- | --- | --- |
+| Python | 3.9 ~ 3.12（推荐 3.10+） | 运行程序 |
+| PyCharm（社区版即可） | 任意较新版本 | 管理项目 / 运行 `main.py` |
+| VS Code + Python 扩展 | 任意较新版本 | 改代码（`config.yaml`、模板） |
+| 浏览器（Edge / Chrome） | 任意 | 打开 Streamlit 网页界面 |
+
+### 2. pip 依赖包
+
+```bash
+pip install -r requirements.txt
+# 国内网络慢可以加镜像：
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+| 包 | 是否必需 | 说明 |
+| --- | --- | --- |
+| `PyYAML` | ✅ 必需 | 读写 `config.yaml` 和 `persona/*.yaml` |
+| `streamlit` | ✅ 必需（用网页版） | 网页界面；只用命令行可以不装 |
+| `jieba` | ⭐ 建议 | 中文分词，装了「高频词」统计明显更准；不装会自动降级 |
+| `pandas`、`Pillow` | 自动安装 | streamlit 的依赖，无需手动指定 |
+
+> 不需要任何云端大模型 API Key。若想要更自然的句子，可以选装本机
+> [Ollama](https://ollama.com/) 并在 `config.yaml` 里把 `generator.engine` 改成 `ollama`，
+> 请求地址固定为本机 `127.0.0.1:11434`，依然不联网上传数据。
+
+---
+
+## 三、快速开始（5 分钟）
+
+```bash
+# 1. 安装依赖
+pip install -r requirements.txt
+
+# 2. 学习示例聊天记录（会自动生成 persona/*.yaml）
+python main.py learn
+
+# 3. 打开网页版
+streamlit run app.py
+```
+
+浏览器会自动打开 <http://localhost:8501>。
+
+### 换成你自己的聊天记录
+
+1. 在微信里长按消息 → 多选 → 复制（或者逐条复制），粘贴到记事本/RapidTyping 之类的工具里整理成下面这种格式；
+2. 保存成 `chat_records/朋友_小张.txt`（文件名规则：`关系_名字.txt`，关系会影响语气判定）；
+3. 回到网页版「📚 学习/更新」→ 选这个文件 → 点「学习这个联系人」；
+4. 之后就能在「💬 生成回复」里用了。
+
+### 聊天记录格式
+
+```
+2024-05-01 20:31:12 小张: 在吗
+2024-05-01 20:31:40 我: 在呢
+2024-05-01 20:31:52 小张: 周末打球不
+我: 打啊 几点              ← 时间可以省略
+我: 打完球去吃饭吧          ← 连续多行都会算作我的消息
+```
+
+* 说话人写「我」代表你自己（可在 `config.yaml` 的 `identity.me_names` 里加你的微信昵称）；
+* 以 `#` 开头的行是注释，会被忽略；
+* 一条消息换行写也没关系，续行会自动接到上一条；
+* 微信里的 `[图片]`、`[表情]` 这类占位符会原样保留，不影响统计。
+
+---
+
+## 四、网页版使用教程
+
+| 标签页 | 怎么用 |
+| --- | --- |
+| 💬 生成回复 | 左侧选联系人 → 粘贴对方消息 → 点「🚀 生成回复」→ 每条备选右上角有复制按钮 → 按推荐去微信里挑表情包。点「🎲 换一批」会重新随机 |
+| 🧑 我的人设档案 | 看自动生成的总结、高频词柱状图、口头禅、标点习惯、禁忌话术、真实问答示例；可以展开查看并下载 yaml 手改 |
+| 😂 表情包库 | 看全部表情包和标签；上传新图片 + 打标签；修改已有标签；输入一句话试推荐效果 |
+| 📚 学习/更新 | 看已导入的记录；学习单个/全部联系人；也可以直接在这里「新增聊天记录」或把新记录追加到已有文件 |
+| ❓ 使用说明 | 内置的简明教程 |
+
+---
+
+## 五、命令行用法（不想开网页时）
+
+```bash
+python main.py learn                                  # 学习 chat_records/ 下全部记录
+python main.py learn --contact 朋友_小张               # 只学一个
+python main.py list                                   # 看已有人设档案
+python main.py reply --contact 朋友_小张 --msg "在吗"   # 生成 2~3 条备选回复
+python main.py emoji --msg "笑死我了"                   # 只推荐表情包
+python main.py interactive                            # 命令行交互模式（边聊边试）
+python main.py gui                                    # 提示如何启动网页版
+```
+
+---
+
+## 六、表情包库管理
+
+* 图片放在 `emoji_lib/`（jpg / png / gif / webp 都行）；
+* 标签写在 `emoji_lib/emoji_tag.csv`，格式：
+
+```csv
+filename,tags
+doge.png,搞笑,狗头,无语
+shoudao.png,收到,OK,好的
+```
+
+* 推荐逻辑：`config.yaml` 里的 `emoji_tags` 是「关键词 → 标签」映射表，
+  比如聊天里出现「笑死」→ 命中标签 `搞笑/哈哈` → 给带这些标签的表情包加分，
+  再叠加你的语气加成和你平时爱用的表情，最后返回分数最高的 1~2 个；
+* 想让它更懂你：在 `emoji_tags` 里加关键词，或给表情包多加几个标签。
+
+> 注意：表情包图片需要你自己在微信里手动选择发送（本项目不接管微信）。
+> `emoji_lib/` 里的 12 张图是程序生成的**占位图**，直接替换成你自己的表情包即可（文件名保持一致就不用改 csv）。
+
+---
+
+## 七、配置说明（config.yaml）
+
+| 配置段 | 作用 |
+| --- | --- |
+| `identity.me_names` | 聊天记录里哪些名字算「我」 |
+| `generator.engine` | `local`（默认，纯本地规则）/ `ollama`（本机大模型） |
+| `generator.candidates` | 每次生成几条备选 |
+| `learning.*` | 高频词/口头禅/示例条数、是否增量学习 |
+| `contacts` | 手动指定某个联系人属于什么关系 |
+| `relation_tone` | 关系到基础语气的映射 |
+| `forbidden` | 禁忌话术（生成时绝不出现），可按关系分别设置 |
+| `intents` | 「对方消息 → 意图」的关键词规则 |
+| `reply_templates` | 意图 → 短/中/长 三档回复模板（生成的主力） |
+| `tone_templates` | **语气专用模板**，优先级高于 `reply_templates`：同一个意图，对同事正式、对朋友随便 |
+| `tone_flavor` | 不同语气的口癖前缀/后缀 |
+| `tone_emoji_bonus` | 不同语气加分的表情包标签 |
+| `emoji_tags` | 关键词 → 表情包标签（语义推荐的核心） |
+
+模板里可用的占位符：`{口头禅}`、`{高频词}`、`{关键词}`、`{话题}`、`{称呼}`。
+
+---
+
+## 八、后续迭代怎么做
+
+| 想做的事 | 操作 |
+| --- | --- |
+| 追加新聊天记录 | 把新内容粘贴到对应 txt 末尾（或网页版「📚 学习/更新」里选「追加到已有文件」）→ 再点一次「学习这个联系人」，勾选**增量学习**就会和旧档案合并 |
+| 新增表情包 | 图片丢进 `emoji_lib/`，在网页版上传并打标签，或直接往 `emoji_tag.csv` 加一行 |
+| 新增标签体系 | 改 `config.yaml` 的 `emoji_tags` 和 `tone_emoji_bonus` |
+| 让某个联系人的语气更准 | 直接改 `persona/<联系人>.yaml` 里的 `style.tone`、`summary`、`generation_hint`，刷新网页即生效 |
+| 完全换一套说话模板 | 改 `config.yaml` 的 `reply_templates`，不用动代码 |
+| 想上本地大模型 | 装 Ollama → `ollama pull qwen2.5:7b` → `config.yaml` 里 `generator.engine: ollama` |
+
+---
+
+## 九、常见问题
+
+**Q：`python main.py learn` 说「没有识别到我说的话」？**
+A：检查两件事：① 说话人是不是写的「我」；② 要不要把你的微信昵称加到
+`config.yaml` 的 `identity.me_names`（例如 `["我", "阿张"]`）。
+
+**Q：Windows 命令行里中文显示乱码？**
+A：在命令行先执行 `chcp 65001`，或直接用网页版 / PyCharm 运行。
+
+**Q：生成的回复不太像我？**
+A：① 素材太少——同一个联系人给到 50~200 条你的消息；② 装 `jieba`；③ 直接改
+`config.yaml` 的 `reply_templates`，那是「我的话术库」，改完立刻生效。
+
+**Q：会封号吗？**
+A：不会碰微信：不注入、不 Hook、不读微信数据库、不自动发送，微信只把它当成一个普通记事本。
+
+**Q：数据会上传吗？**
+A：不会。程序只读写本目录下的文件；只有你主动把 `generator.engine` 改成 `ollama`
+时才会访问本机 `127.0.0.1`。
+
+---
+
+## 十、PyCharm / VS Code 配置建议
+
+**PyCharm**
+1. `File → Open` 选择 `wechat_assistant` 文件夹；
+2. `Settings → Project → Python Interpreter` 新建虚拟环境（venv）→ 安装 `requirements.txt`；
+3. 运行 `main.py` 时在 `Run → Edit Configurations` 里加参数，例如 `learn` 或
+   `reply --contact 朋友_小张 --msg "在吗"`；
+4. 想跑网页版：打开 Terminal 执行 `streamlit run app.py`。
+
+**VS Code**
+1. 打开项目文件夹 → 安装 Python 扩展 → 选择解释器（venv）；
+2. `Ctrl+Shift+P → Python: Create Terminal`，执行 `pip install -r requirements.txt`；
+3. 直接点 `main.py` 右上角 ▷ 运行，或在终端执行上面的命令。
+
+---
+
+## 十一、分享给别人 / 上传 GitHub
+
+### 1. 先分清什么能公开
+
+| 内容 | 能否公开 |
+| --- | --- |
+| `chat_records/` 里**你的真实聊天记录** | ❌ 绝对不要（等于把聊天内容公开） |
+| `persona/*.yaml`（由真实记录生成） | ❌ 不要（等于把你的说话习惯和口头禅公开） |
+| `config.yaml` 的 `contacts` 段 | ⚠️ 如果写了真人名字，分享前删掉 |
+| `emoji_lib/` 里从微信导出的真实表情包 | ⚠️ 可能涉及版权，自己权衡 |
+| `main.py` / `app.py` / `README.md` / `requirements.txt` | ✅ 随便公开 |
+| `chat_records/` 里那 3 份**虚构示例** | ✅ 是我编的，可以公开 |
+
+项目里已经带了一份 `.gitignore`，默认**只放行那 3 份虚构示例**，
+你自己的聊天记录和生成的人设档案不会被提交（即使你忘了删也传不上去）。
+
+### 2. 一键生成干净副本
+
+```bash
+python make_share_zip.py                 # 干净版：自动剔除你的私人数据
+python make_share_zip.py --full          # 完整版：连私人数据一起打包（只适合自己备份）
+```
+
+产物：`share_output/wechat_assistant/`（文件夹）+ `wechat_assistant_share.zip`（可直接发给别人）。
+对方拿到后：`pip install -r requirements.txt` → `python main.py learn` → `streamlit run app.py`。
+
+### 3. 上传 GitHub（三种方式，选一个）
+
+**方式 A：命令行 git（推荐，本机已装 git 2.56）**
+
+项目已经初始化好仓库并把文件加进暂存区了，你只需：
+
+```bash
+cd C:\Users\zhang\Desktop\wechat_assistant
+
+# 1) 配置提交身份（只需一次；--global 表示对这台电脑所有仓库生效）
+git config --global user.name "你的名字"
+git config --global user.email "你的邮箱"
+
+# 2) 提交
+git commit -m "feat: 微信聊天模仿助手（本地离线版）"
+
+# 3) 在 github.com 右上角 New repository 建一个空仓库（别勾 Add README / .gitignore）
+git remote add origin https://github.com/你的用户名/wechat-assistant.git
+git branch -M main
+git push -u origin main
+```
+
+> 推送时会要账号密码：GitHub 早已不支持密码，请用 **Personal Access Token**
+> （GitHub → Settings → Developer settings → Personal access tokens → 勾 `repo`）
+> 当作密码粘贴；或者直接用下面的 GitHub Desktop。
+
+**方式 B：GitHub Desktop（图形界面，最省心）**
+1. 装 [GitHub Desktop](https://desktop.github.com/) 并登录；
+2. `File → Add local repository` → 选 `C:\Users\zhang\Desktop\wechat_assistant`；
+3. 左下角填 Summary → `Commit to main` → 右上角 `Publish repository`；
+4. 想公开就取消勾选 `Keep this code private`。
+
+**方式 C：网页直接拖拽（完全不用装工具，适合只传一次）**
+1. 先跑 `python make_share_zip.py`，把 `share_output/wechat_assistant/` 解压出来；
+2. 在 GitHub 新建空仓库 → `uploading an existing file`；
+3. 把干净副本里的文件（**不要**整个包含 `.git`、`chat_records/你的记录`）拖进去 → Commit。
+
+### 4. 之后每次更新
+
+```bash
+git add -A
+git commit -m "更新：xxxx"
+git push
+```
+GitHub Desktop 用户直接 Commit + Push 即可。
+
+### 5. 上传前最后检查一遍
+
+- [ ] `git status` 里没有出现你的真实聊天记录、没有 `persona/你的联系人.yaml`
+- [ ] `config.yaml` 的 `contacts:` 里没有真人名字
+- [ ] README / 截图里没有真实聊天内容
+- [ ] 仓库名、描述里别写「破解微信、自动发消息」之类字眼（本项目本来也不做这些）
+
+> 注意：**上传 GitHub 就等于把代码放到云端了**。如果你只想私下分享给一两个朋友，
+> 直接把 `wechat_assistant_share.zip` 发给他更安全，完全不用上 GitHub。
+
+---
+
+## 十二、安全与隐私声明
+
+* 不调用任何微信接口、不注入进程、不监听消息、不自动发送；
+* 不访问网络（唯一例外：你主动开启 `engine: ollama` 时访问本机 `127.0.0.1`）；
+* 聊天记录、人设档案、表情包全部保存在本项目目录，可随时整个文件夹打包 / 删除；
+* 分享 / 上传前请用 `python make_share_zip.py` 生成脱敏副本，避免把私人聊天内容传上云端。

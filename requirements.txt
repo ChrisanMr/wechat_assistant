@@ -1,0 +1,18 @@
+# 微信聊天模仿助手 - 依赖清单
+# 安装命令（建议在项目目录下执行）：
+#     pip install -r requirements.txt
+#
+# 如果下载慢，可以用国内镜像：
+#     pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# --- 必需 ---
+PyYAML>=6.0            # 读写人设档案 config.yaml / persona/*.yaml
+streamlit>=1.30        # 网页版界面（app.py）
+
+# --- 强烈建议（不装也能跑，只是高频词统计会差一些）---
+jieba>=0.42.1          # 中文分词，让「高频词」更准确
+
+# --- 说明 ---
+# pandas / Pillow 会随 streamlit 自动装上，无需手动指定
+# 本项目不依赖任何云端大模型 SDK；只有把 config.yaml 里的
+# generator.engine 改成 ollama 时，才会访问本机 127.0.0.1:11434
